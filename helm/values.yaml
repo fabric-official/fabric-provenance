@@ -1,0 +1,8 @@
+image:
+  repository: ""
+  tag: ""
+service:
+  port: 8080
+ingress:
+  host: ""
+  tls: true

@@ -1,0 +1,66 @@
+
+name: ci
+on:
+  push: { branches: [ main, staging ] }
+  pull_request: { branches: [ main, staging ] }
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build image
+        run: |
+          IMAGE=ghcr.io/fabric-official/fabric-provenance:${{ github.sha }}
+          docker build -t $IMAGE .
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+      - name: Push image
+        run: docker push $IMAGE
+      - name: Set tag per branch
+        id: settag
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "TAG=prod" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=staging" >> $GITHUB_OUTPUT
+          fi
+      - name: Retag latest per env
+        run: |
+          docker tag $IMAGE ghcr.io/fabric-official/fabric-provenance:${{ steps.settag.outputs.TAG }}
+          docker push ghcr.io/fabric-official/fabric-provenance:${{ steps.settag.outputs.TAG }}
+
+  deploy:
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+      - name: Set KUBECONFIG
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "${{ secrets.KUBE_CONFIG_PROD }}" | base64 -d > $HOME/kubeconfig
+          else
+            echo "${{ secrets.KUBE_CONFIG_STAGING }}" | base64 -d > $HOME/kubeconfig
+          fi
+          echo "KUBECONFIG=$HOME/kubeconfig" >> $GITHUB_ENV
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+      - name: Deploy chart
+        run: |
+          BRANCH=$(echo "${{ github.ref }}" | awk -F/ '{print $NF}')
+          TAG=$([ "$BRANCH" = "main" ] && echo "prod" || echo "staging")
+          HOST=$([ "$BRANCH" = "main" ] && echo "provenance.fabric-official.com" || echo "staging.provenance.fabric-official.com")
+          helm upgrade --install app ./helm --namespace fabric --create-namespace             --set image.repository=ghcr.io/fabric-official/fabric-provenance             --set image.tag=$TAG             --set ingress.host=$HOST
